@@ -38,6 +38,7 @@ class CausalAttention(nn.Module):
 
         # Using attention dim from attention is all you need
         assert config.d_model % config.n_heads == 0
+        self.n_heads = config.n_heads
         self.d_attention = int(config.d_model / config.n_heads)
 
         #self.c_attn = nn.Linear(config.d_model, 3 * config.d_model)
@@ -61,8 +62,27 @@ class CausalAttention(nn.Module):
         self, x: Float[Tensor, "batch seq_len d_model"]
     ) -> Float[Tensor, "batch seq_len d_model"]:
 
-        # TODO, complete 
-        return torch.empty(1)
+        batch, seq_len, _ = x.shape
+
+        # Project the input into queries, keys and values, then split into heads.
+        q = rearrange(self.W_q(x), "b t (h d) -> b h t d", h=self.n_heads)
+        k = rearrange(self.W_k(x), "b t (h d) -> b h t d", h=self.n_heads)
+        v = rearrange(self.W_v(x), "b t (h d) -> b h t d", h=self.n_heads)
+
+        # Scaled dot-product attention scores: [b, h, t, t]
+        scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.d_attention)
+
+        # Causal masking: a position may only attend to itself and the past.
+        mask = self.causal_mask[:, :, :seq_len, :seq_len]
+        scores = scores.masked_fill(mask == 0, float("-inf"))
+
+        attn = softmax(scores, dim=-1)
+
+        # Weighted sum of the values, then merge the heads back together.
+        out = attn @ v  # [b, h, t, d]
+        out = rearrange(out, "b h t d -> b t (h d)")
+
+        return self.W_o(out)
 
 
 
@@ -88,9 +108,8 @@ class MLP(nn.Module):
         self, x: Float[Tensor, "batch seq_len d_model"]
     ) -> Float[Tensor, "batch seq_len d_model"]:
 
-        # TODO, complete
-        return torch.empty(1)
-        
+        return self.fc2(self.gelu(self.fc1(x)))
+
 
 class DecoderBlock(nn.Module):
 
@@ -106,8 +125,10 @@ class DecoderBlock(nn.Module):
         self, x: Float[Tensor, "batch seq_len d_model"]
     ) -> Float[Tensor, "batch seq_len d_model"]:
 
-        # TODO complete
-        return torch.empty(1)
+        # Pre-layernorm GPT-2 style residual block.
+        x = x + self.attention(self.pre_layer_norm(x))
+        x = x + self.mlp(self.post_layer_norm(x))
+        return x
 
 
 class Transformer(nn.Module):
@@ -148,8 +169,20 @@ class Transformer(nn.Module):
         self, x: Int[Tensor, "batch_size seq_len"]
     ) -> Float[Tensor, "batch seq_len vocab_size"]:
 
-        # TODO, complete
-        return torch.empty(1)
+        batch_size, seq_len = x.shape
+
+        # Token embeddings + (learned) positional embeddings.
+        positions = torch.arange(seq_len, device=x.device)
+        h = self.embeddings(x) + self.position_embeddings(positions)
+
+        # Pass through the stack of decoder blocks.
+        for block in self.backbone:
+            h = block(h)
+
+        h = self.final_layer_norm(h)
+        logits = self.lm_head(h)
+
+        return logits
 
     @torch.no_grad()
     def generate(
@@ -158,17 +191,35 @@ class Transformer(nn.Module):
         num_new_tokens: int,
     ) -> Int[Tensor, "batch_size seq_len+num_new_tokens"]:
 
-        # TODO, complete
-        return torch.empty(1)
+        for _ in range(num_new_tokens):
+            # Never feed more than the context window into the model.
+            x_cond = x[:, -self.config.context_length:]
+
+            logits = self.forward(x_cond)
+
+            # Greedy decoding: take the most likely next token.
+            next_token_logits = logits[:, -1, :]
+            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+            x = torch.cat([x, next_token], dim=1)
+
+        return x
 
 
     def get_loss_on_batch(
         self,
-        input_ids: Int[Tensor, "batch_size seq_len"], 
+        input_ids: Int[Tensor, "batch_size seq_len"],
     ) -> Float[Tensor, ""]:
 
-        # TODO, complete
-        return torch.empty(1)
+        logits = self.forward(input_ids)
+
+        # Next-token prediction: align logits at position t with token at t+1.
+        shifted_logits = logits[:, :-1, :].reshape(-1, logits.size(-1))
+        shifted_targets = input_ids[:, 1:].reshape(-1)
+
+        loss = F.cross_entropy(shifted_logits, shifted_targets)
+
+        return loss
 
 
     @classmethod
